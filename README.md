@@ -93,7 +93,10 @@ You can set the configuration using environment variables:
 ```bash
 export ABS_BASE_URL="https://abs.example.com"
 export ABS_API_KEY="your-api-token-here"
+export ABS_HTTP_TIMEOUT="60s"   # optional, default 60s (scans and matches can be slow)
 ```
+
+Write tools need an API key of a user with update permission (and delete permission for `delete_item`).
 
 Alternatively, you can pass these as parameters when calling tools (see Tool Parameters below).
 
@@ -154,9 +157,16 @@ Add this to your Claude Desktop configuration file:
   - `playlists=true` - Get all playlists in the library
   - `personalized=true` - Get personalized view for the library
   - `filterdata=true` - Get filter data for the library
+  - `narrators=true` - Get all narrators with book counts
   - `stats=true` - Get library statistics
+  - `search=true` / `q` - Search by title, author, series, narrator, tag, genre (`q` alone implies search)
   - `episode-downloads=true` - Get episode downloads for the library
   - `recent-episodes=true` - Get recent episodes for the library
+  - Query options for lists: `limit`, `page`, `sort`, `desc`, `filter_group` + `filter_value`
+    (e.g. `narrators` + `Александр Чайцын`, `series` + series id, `missing` / `issues`), `minified`, `collapse_series`, `include`.
+    Series default to `limit=1000` (without a limit ABS returns an empty series list).
+- **scan_library** - Scan a library (`force=true` rescans everything)
+- **update_library** - Change name, metadata provider or settings (e.g. `autoScanCronExpression`)
 - **create_library** - Create a new library
   - Required: `name`, `folders` (comma-separated paths), `media_type` (book or podcast)
   - Optional: `icon`, `provider`
@@ -166,10 +176,30 @@ Add this to your Claude Desktop configuration file:
 - **item** - Get a single item (audiobook or podcast) by ID, or fetch specific item sub-resources:
   - `cover=true` - Get the cover image for the item
   - `tone-object=true` - Get the tone object for the item
+- **batch_get_items** - Get several items by ID in one call
+- **update_item** - Edit book metadata. Only passed fields change; list fields replace the whole list:
+  `title`, `subtitle`, `authors`, `narrators`, `series` (`[{"name":"Файролл","sequence":"13.2"}]`),
+  `genres`, `tags`, `description`, `published_year`, `published_date`, `publisher`, `language`, `isbn`, `asin`, `explicit`, `abridged`.
+  An empty string clears a text field, an empty array clears a list.
+- **batch_update_items** - The same for many items in one request: `updates=[{"item_id":"…","title":"…"}, …]`
+- **match_item** - Quick match against a metadata provider (`provider`, `title`, `author`, `isbn`, `asin`, `override_details`, `override_cover`)
+- **set_item_cover** - Set cover from a `url` or from an image `path` inside the item folder
+- **scan_item** - Rescan one item from disk
+- **delete_item** - Remove an item from the library; files stay on disk unless `delete_files=true` (irreversible)
 
-### Authors
+### Authors, Series, Narrators
 
 - **author** - Get a single author by ID
+- **update_author** - Rename (renaming to an existing author's name merges them), set description or ASIN
+- **series** - Get a single series by ID
+- **update_series** - Rename a series or set its description (book membership and sequence are edited with `update_item`)
+- **rename_narrator** - Rename or merge a narrator across a library
+
+### Genres and Tags
+
+- **genres** / **tags** - List all genres / tags
+- **rename_genre** / **rename_tag** - Rename everywhere (merges into an existing one with the new name)
+- **delete_genre** / **delete_tag** - Remove from every item
 
 ### Collections
 
@@ -179,6 +209,10 @@ Add this to your Claude Desktop configuration file:
   - Required: `library_id`, `name`
   - Optional: `description`
 - **add_to_collection** - Add a book to an existing collection
+- **batch_add_to_collection** - Add several books in the given order
+- **update_collection** - Rename, change description, or reorder books (`book_ids` in the desired order)
+- **remove_from_collection** - Remove a book from a collection
+- **delete_collection** - Delete a collection (books are not affected)
   - Required: `collection_id`, `book_id`
 
 ### Playlists
@@ -266,7 +300,8 @@ The AI assistant will use the appropriate MCP tools to fetch information and man
 
 ### Project Structure
 
-- `main.go` - Main server implementation
+- `main.go` - Main server implementation (read tools, HTTP helpers)
+- `edit_tools.go` - Write tools: metadata editing, authors/series/narrators, genres/tags, collections, scans
 - Helper functions for API authentication and request handling
 - MCP tool definitions and handlers
 
