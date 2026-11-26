@@ -16,7 +16,18 @@ import (
 )
 
 var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
+	Timeout: httpTimeout(),
+}
+
+// httpTimeout returns the HTTP timeout for ABS calls. Scans and metadata matches can be slow,
+// so the default is 60s; override with ABS_HTTP_TIMEOUT (Go duration, e.g. "2m").
+func httpTimeout() time.Duration {
+	if v := os.Getenv("ABS_HTTP_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 60 * time.Second
 }
 
 func getEnvOrParam(paramValue, envKey string) string {
@@ -155,37 +166,15 @@ func createGETByIDWithSubResourceHandler(basePath, idParamName string, subResour
 }
 
 func absGET(ctx context.Context, baseURL, token, path string) ([]byte, error) {
-	fullURL := strings.TrimSuffix(baseURL, "/") + path
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("call ABS API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ABS API returned %s: %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	return body, nil
+	return absRequest(ctx, http.MethodGet, baseURL, token, path, nil)
 }
 
 func absPOST(ctx context.Context, baseURL, token, path string, payload interface{}) ([]byte, error) {
+	return absRequest(ctx, http.MethodPost, baseURL, token, path, payload)
+}
+
+// absRequest performs an HTTP call against the ABS API with an optional JSON payload.
+func absRequest(ctx context.Context, method, baseURL, token, path string, payload interface{}) ([]byte, error) {
 	fullURL := strings.TrimSuffix(baseURL, "/") + path
 
 	var bodyReader io.Reader
@@ -197,7 +186,7 @@ func absPOST(ctx context.Context, baseURL, token, path string, payload interface
 		bodyReader = bytes.NewBuffer(jsonData)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -205,7 +194,9 @@ func absPOST(ctx context.Context, baseURL, token, path string, payload interface
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -230,7 +221,7 @@ func main() {
 	// Create a new MCP server
 	s := server.NewMCPServer(
 		"Audiobookshelf MCP Server",
-		"1.0.0",
+		"1.1.0",
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
 	)
@@ -240,21 +231,7 @@ func main() {
 	librariesOpts := append(withABSAuth(), mcp.WithDescription("List Audiobookshelf libraries"))
 	librariesTool := mcp.NewTool("libraries", librariesOpts...)
 
-	libraryOpts := append(withABSAuth(),
-		mcp.WithDescription("Retrieve a single Audiobookshelf library by ID, optionally with sub-resources"),
-		mcp.WithString("library_id", mcp.Required(), mcp.Description("Library identifier to fetch")),
-		mcp.WithBoolean("items", mcp.Description("Include all items in the library")),
-		mcp.WithBoolean("authors", mcp.Description("Include all authors in the library")),
-		mcp.WithBoolean("series", mcp.Description("Include all series in the library")),
-		mcp.WithBoolean("collections", mcp.Description("Include all collections in the library")),
-		mcp.WithBoolean("playlists", mcp.Description("Include all playlists in the library")),
-		mcp.WithBoolean("personalized", mcp.Description("Include personalized view for the library")),
-		mcp.WithBoolean("filterdata", mcp.Description("Include filter data for the library")),
-		mcp.WithBoolean("stats", mcp.Description("Include library statistics")),
-		mcp.WithBoolean("search", mcp.Description("Search the library items")),
-		mcp.WithBoolean("episode-downloads", mcp.Description("Include episode downloads for the library")),
-		mcp.WithBoolean("recent-episodes", mcp.Description("Include recent episodes for the library")),
-	)
+	libraryOpts := libraryToolOptions()
 	libraryTool := mcp.NewTool("library", libraryOpts...)
 
 	// Create library tool
@@ -457,19 +434,7 @@ func main() {
 
 	// Add ABS Libraries handlers
 	s.AddTool(librariesTool, createSimpleGETHandler("/libraries"))
-	s.AddTool(libraryTool, createGETByIDWithSubResourceHandler("/libraries/%s", "library_id", []string{
-		"items",
-		"authors",
-		"series",
-		"collections",
-		"playlists",
-		"personalized",
-		"filterdata",
-		"stats",
-		"search",
-		"episode-downloads",
-		"recent-episodes",
-	}))
+	s.AddTool(libraryTool, libraryHandler())
 	s.AddTool(createLibraryTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		baseURL, token, err := getABSConfig(request)
 		if err != nil {
@@ -859,6 +824,9 @@ func main() {
 	// Add Tags and Genres handlers
 	s.AddTool(tagsTool, createSimpleGETHandler("/tags"))
 	s.AddTool(genresTool, createSimpleGETHandler("/genres"))
+
+	// Write/edit tools (metadata, authors, series, genres, tags, collections, scans)
+	registerEditTools(s)
 
 	// Start the server
 	if err := server.ServeStdio(s); err != nil {
